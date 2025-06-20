@@ -1,0 +1,151 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+
+// ESP32-S3 Default I2C Pins
+#define SDA_PIN 8
+#define SCL_PIN 9
+#define BNO055_ADDR 0x28  // Use 0x29 if address jumper is closed
+
+// Filter parameters
+#define CUTOFF_FREQ 2.0f  // 2Hz cutoff frequency
+#define SAMPLE_RATE 30    // 30Hz sampling rate
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55, BNO055_ADDR, &Wire);
+
+// Butterworth LPF variables (2nd order)
+typedef struct {
+  float a[3];
+  float b[3];
+  float x[3];
+  float y[3];
+} ButterworthFilter;
+
+ButterworthFilter accelX, accelY, accelZ;
+ButterworthFilter gyroX, gyroY, gyroZ;
+ButterworthFilter magX, magY, magZ;
+ButterworthFilter eulerX, eulerY, eulerZ;
+
+void setupButterworthFilter(ButterworthFilter* filter, float cutoffFreq, float sampleRate) {
+  float omega = 2.0 * PI * cutoffFreq;
+  float dt = 1.0 / sampleRate;
+  float alpha = omega * dt;
+  
+  // 2nd order Butterworth coefficients
+  filter->a[0] = alpha * alpha + 2 * alpha + 1;
+  filter->a[1] = 2 - 2 * alpha * alpha;
+  filter->a[2] = alpha * alpha - 2 * alpha + 1;
+  
+  filter->b[0] = alpha * alpha;
+  filter->b[1] = 2 * alpha * alpha;
+  filter->b[2] = alpha * alpha;
+}
+
+float applyButterworthFilter(ButterworthFilter* filter, float input) {
+  // Shift previous values
+  filter->x[2] = filter->x[1];
+  filter->x[1] = filter->x[0];
+  filter->x[0] = input;
+  
+  filter->y[2] = filter->y[1];
+  filter->y[1] = filter->y[0];
+  
+  // Apply filter
+  filter->y[0] = (filter->b[0] * filter->x[0] + 
+                 filter->b[1] * filter->x[1] + 
+                 filter->b[2] * filter->x[2] - 
+                 filter->a[1] * filter->y[1] - 
+                 filter->a[2] * filter->y[2]) / filter->a[0];
+  
+  return filter->y[0];
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+  
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+  
+  if (!bno.begin()) {
+    Serial.println("BNO055 not detected! Check wiring:");
+    Serial.println("- SDA to GPIO8");
+    Serial.println("- SCL to GPIO9");
+    Serial.println("- 3.3V power");
+    Serial.println("- I2C address (try 0x29)");
+    while (1);
+  }
+  
+  delay(1000);
+  bno.setExtCrystalUse(true);
+
+  // Initialize all filters
+  setupButterworthFilter(&accelX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&accelY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&accelZ, CUTOFF_FREQ, SAMPLE_RATE);
+  
+  setupButterworthFilter(&gyroX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&gyroY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&gyroZ, CUTOFF_FREQ, SAMPLE_RATE);
+  
+  setupButterworthFilter(&magX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&magY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&magZ, CUTOFF_FREQ, SAMPLE_RATE);
+  
+  setupButterworthFilter(&eulerX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&eulerY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&eulerZ, CUTOFF_FREQ, SAMPLE_RATE);
+  
+  Serial.println("BNO055 Filtered Data for Serial Plotter");
+  Serial.println("AccX,AccY,AccZ,GyrX,GyrY,GyrZ,MagX,MagY,MagZ,EulX,EulY,EulZ");
+}
+
+void loop() {
+  static unsigned long lastTime = 0;
+  unsigned long now = millis();
+  
+  if (now - lastTime >= 1000/SAMPLE_RATE) {
+    lastTime = now;
+    
+    // Get raw sensor data
+    imu::Vector<3> accel = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+    imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+    imu::Vector<3> mag = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
+    imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+    
+    // Apply Butterworth filters
+    float filteredAccX = applyButterworthFilter(&accelX, accel.x());
+    float filteredAccY = applyButterworthFilter(&accelY, accel.y());
+    float filteredAccZ = applyButterworthFilter(&accelZ, accel.z());
+    
+    float filteredGyrX = applyButterworthFilter(&gyroX, gyro.x());
+    float filteredGyrY = applyButterworthFilter(&gyroY, gyro.y());
+    float filteredGyrZ = applyButterworthFilter(&gyroZ, gyro.z());
+    
+    float filteredMagX = applyButterworthFilter(&magX, mag.x());
+    float filteredMagY = applyButterworthFilter(&magY, mag.y());
+    float filteredMagZ = applyButterworthFilter(&magZ, mag.z());
+    
+    float filteredEulX = applyButterworthFilter(&eulerX, euler.x());
+    float filteredEulY = applyButterworthFilter(&eulerY, euler.y());
+    float filteredEulZ = applyButterworthFilter(&eulerZ, euler.z());
+    
+    // Serial Plotter output (CSV format)
+    Serial.print(filteredAccX); Serial.print(",");
+    Serial.print(filteredAccY); Serial.print(",");
+    Serial.print(filteredAccZ); Serial.print(",");
+    
+    Serial.print(filteredGyrX); Serial.print(",");
+    Serial.print(filteredGyrY); Serial.print(",");
+    Serial.print(filteredGyrZ); Serial.print(",");
+    
+    Serial.print(filteredMagX); Serial.print(",");
+    Serial.print(filteredMagY); Serial.print(",");
+    Serial.print(filteredMagZ); Serial.print(",");
+    
+    Serial.print(filteredEulX); Serial.print(",");
+    Serial.print(filteredEulY); Serial.print(",");
+    Serial.println(filteredEulZ);
+  }
+}

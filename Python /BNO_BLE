@@ -1,0 +1,34 @@
+import asyncio
+from bleak import BleakScanner, BleakClient
+
+# UUIDs for Nordic UART Service (NUS)
+UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"  # ESP32 → PC
+
+def handle_rx(_, data):
+    print("Received:", data.decode().strip())
+
+async def main():
+    print("🔍 Scanning for BLE devices...")
+    devices = await BleakScanner.discover(timeout=5.0)
+    
+    target = None
+    for d in devices:
+        if d.name and "ESP32-BNO055-BLE" in d.name:
+            target = d
+            break
+
+    if not target:
+        print("❌ ESP32 not found. Make sure it's powered and advertising.")
+        return
+
+    print(f"✅ Found {target.name} at {target.address}")
+    async with BleakClient(target.address) as client:
+        print("🔗 Connected. Subscribing to notifications...")
+        await client.start_notify(UART_RX_CHAR_UUID, handle_rx)
+
+        print("📡 Listening for data (press Ctrl+C to stop)...")
+        while True:
+            await asyncio.sleep(1)
+
+asyncio.run(main())

@@ -1,0 +1,72 @@
+import sys
+
+# ✅ Fix for Bleak thread mode on Windows + Python 3.13
+try:
+    from bleak.backends.winrt.util import uninitialize_sta
+    uninitialize_sta()
+except ImportError:
+    pass
+
+import asyncio
+from bleak import BleakScanner, BleakClient
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from collections import deque
+
+# UUIDs for Nordic UART Service
+UART_SERVICE_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+# Rolling data buffers
+N = 100
+acc_x = deque([0] * N, maxlen=N)
+acc_y = deque([0] * N, maxlen=N)
+acc_z = deque([0] * N, maxlen=N)
+
+# Set up the plot
+fig, ax = plt.subplots()
+line_x, = ax.plot(range(N), acc_x, label="AccX")
+line_y, = ax.plot(range(N), acc_y, label="AccY")
+line_z, = ax.plot(range(N), acc_z, label="AccZ")
+
+ax.set_ylim(-20, 20)
+ax.set_title("Live BNO055 Accelerometer Data")
+ax.legend(loc="upper right")
+ax.grid(True)
+
+def update_plot(_):
+    line_x.set_ydata(acc_x)
+    line_y.set_ydata(acc_y)
+    line_z.set_ydata(acc_z)
+    return line_x, line_y, line_z
+
+def handle_rx(_, data):
+    try:
+        fields = list(map(float, data.decode().strip().split(",")))
+        acc_x.append(fields[0])
+        acc_y.append(fields[1])
+        acc_z.append(fields[2])
+    except Exception as e:
+        print("⚠️ Parse error:", e)
+
+async def main():
+    print("🔍 Scanning for ESP32-BNO055-BLE...")
+    devices = await BleakScanner.discover(timeout=5)
+    target = next((d for d in devices if d.name and "ESP32-BNO055-BLE" in d.name), None)
+
+    if not target:
+        print("❌ Device not found. Make sure it's powered and advertising.")
+        return
+
+    print(f"✅ Found {target.name} at {target.address}")
+    async with BleakClient(target.address) as client:
+        print("🔗 Connected. Subscribing to BLE notifications...")
+        await client.start_notify(UART_RX_CHAR_UUID, handle_rx)
+
+        # ✅ Keep reference to animation to prevent garbage collection
+        global ani
+        ani = animation.FuncAnimation(fig, update_plot, interval=33)
+        print("📈 Plotting live data. Close the plot window to stop.")
+        plt.show()
+
+asyncio.run(main())

@@ -1,0 +1,84 @@
+#include "ICM_20948.h" 
+
+#define USE_SPI
+#define SAMPLE_RATE_HZ 30    // 30Hz sampling
+#define CUTOFF_FREQ_HZ 2.0   // 2Hz cutoff frequency
+#define SERIAL_PORT Serial
+
+// ESP32-S3 SPI Configuration
+#define SPI_PORT SPI
+#define CS_PIN 10
+
+// Create sensor object
+#ifdef USE_SPI
+ICM_20948_SPI myICM;
+#else
+ICM_20948_I2C myICM;
+#endif
+
+// Low-pass filter variables
+float alpha; // Filter coefficient
+float filteredAccX = 0, filteredAccY = 0, filteredAccZ = 0;
+float filteredGyrX = 0, filteredGyrY = 0, filteredGyrZ = 0;
+
+// Timer variables for precise sampling
+unsigned long lastSampleTime = 0;
+const unsigned long sampleInterval = 1000 / SAMPLE_RATE_HZ; // ms per sample
+
+void setup() {
+  SERIAL_PORT.begin(115200);
+  while (!SERIAL_PORT) {};
+
+  // Calculate filter coefficient (RC filter)
+  float RC = 1.0 / (2 * PI * CUTOFF_FREQ_HZ);
+  float dt = 1.0 / SAMPLE_RATE_HZ;
+  alpha = dt / (RC + dt);
+
+  #ifdef USE_SPI
+    SPI_PORT.begin();
+    myICM.begin(CS_PIN, SPI_PORT);
+  #else
+    Wire.begin();
+    Wire.setClock(400000);
+    myICM.begin(Wire, AD0_VAL);
+  #endif
+
+  // Wait for sensor initialization
+  while (myICM.status != ICM_20948_Stat_Ok) {
+    SERIAL_PORT.println("Initializing...");
+    delay(500);
+  }
+  SERIAL_PORT.println("Sensor ready!");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+  
+  // Strict 30Hz sampling control
+  if (currentTime - lastSampleTime >= sampleInterval) {
+    lastSampleTime = currentTime;
+    
+    if (myICM.dataReady()) {
+      myICM.getAGMT(); // Get new data
+      
+      // Apply low-pass filter to accelerometer
+      filteredAccX = filteredAccX + alpha * (myICM.accX() - filteredAccX);
+      filteredAccY = filteredAccY + alpha * (myICM.accY() - filteredAccY);
+      filteredAccZ = filteredAccZ + alpha * (myICM.accZ() - filteredAccZ);
+      
+      // Apply low-pass filter to gyroscope
+      filteredGyrX = filteredGyrX + alpha * (myICM.gyrX() - filteredGyrX);
+      filteredGyrY = filteredGyrY + alpha * (myICM.gyrY() - filteredGyrY);
+      filteredGyrZ = filteredGyrZ + alpha * (myICM.gyrZ() - filteredGyrZ);
+      
+      // Print filtered data for Serial Plotter
+      SERIAL_PORT.print("AccX:"); SERIAL_PORT.print(filteredAccX);
+      SERIAL_PORT.print(",AccY:"); SERIAL_PORT.print(filteredAccY);
+      SERIAL_PORT.print(",AccZ:"); SERIAL_PORT.print(filteredAccZ);
+      
+      SERIAL_PORT.print(",GyrX:"); SERIAL_PORT.print(filteredGyrX);
+      SERIAL_PORT.print(",GyrY:"); SERIAL_PORT.print(filteredGyrY);
+      SERIAL_PORT.print(",GyrZ:"); SERIAL_PORT.println(filteredGyrZ);
+    }
+  }
+}
