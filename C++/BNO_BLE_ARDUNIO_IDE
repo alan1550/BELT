@@ -1,0 +1,195 @@
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BNO055.h>
+#include <utility/imumaths.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// === Global Configuration ===
+#define SDA_PIN 8
+#define SCL_PIN 9
+#define BNO055_ADDR 0x28
+#define CUTOFF_FREQ 2.0f
+#define SAMPLE_RATE 30
+
+// ✅ Set accelerometer range here (0x00 = ±2g, 0x01 = ±4g, 0x02 = ±8g, 0x03 = ±16g)
+uint8_t accelRangeSetting = 0x00;  // 2g
+
+// ✅ Set gyroscope range here (0x00 = ±250 dps, 0x01 = ±500, 0x02 = ±1000, 0x03 = ±2000, 0x04 = ±125)
+uint8_t gyroRangeSetting = 0x04;   // 125 dps (more sensitive)
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55, BNO055_ADDR, &Wire);
+
+BLECharacteristic* pTxCharacteristic;
+bool deviceConnected = false;
+
+class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("✅ BLE client connected");
+  }
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("🔌 BLE client disconnected");
+  }
+};
+
+// === Butterworth Filter Definition ===
+typedef struct {
+  float a[3];
+  float b[3];
+  float x[3];
+  float y[3];
+} ButterworthFilter;
+
+ButterworthFilter accelX, accelY, accelZ;
+ButterworthFilter gyroX, gyroY, gyroZ;
+ButterworthFilter magX, magY, magZ;
+ButterworthFilter eulerX, eulerY, eulerZ;
+
+void setupButterworthFilter(ButterworthFilter* filter, float cutoffFreq, float sampleRate) {
+  float omega = 2.0 * PI * cutoffFreq;
+  float dt = 1.0 / sampleRate;
+  float alpha = omega * dt;
+
+  filter->a[0] = alpha * alpha + 2 * alpha + 1;
+  filter->a[1] = 2 - 2 * alpha * alpha;
+  filter->a[2] = alpha * alpha - 2 * alpha + 1;
+  filter->b[0] = alpha * alpha;
+  filter->b[1] = 2 * alpha * alpha;
+  filter->b[2] = alpha * alpha;
+}
+
+float applyButterworthFilter(ButterworthFilter* filter, float input) {
+  filter->x[2] = filter->x[1];
+  filter->x[1] = filter->x[0];
+  filter->x[0] = input;
+
+  filter->y[2] = filter->y[1];
+  filter->y[1] = filter->y[0];
+
+  filter->y[0] = (filter->b[0] * filter->x[0] +
+                  filter->b[1] * filter->x[1] +
+                  filter->b[2] * filter->x[2] -
+                  filter->a[1] * filter->y[1] -
+                  filter->a[2] * filter->y[2]) / filter->a[0];
+
+  return filter->y[0];
+}
+
+// === Set Accelerometer Range ===
+void setAccelRange(uint8_t setting) {
+  bno.setMode(OPERATION_MODE_CONFIG);
+  delay(25);
+  Wire.beginTransmission(BNO055_ADDR);
+  Wire.write(0x08);  // ACC_CONFIG register
+  Wire.write(setting);
+  Wire.endTransmission();
+  delay(10);
+  bno.setMode(OPERATION_MODE_NDOF);
+  delay(10);
+}
+
+// === Set Gyroscope Range ===
+void setGyroRange(uint8_t setting) {
+  bno.setMode(OPERATION_MODE_CONFIG);
+  delay(25);
+  Wire.beginTransmission(BNO055_ADDR);
+  Wire.write(0x0A);  // GYRO_CONFIG_0 register
+  Wire.write(setting);
+  Wire.endTransmission();
+  delay(10);
+  bno.setMode(OPERATION_MODE_NDOF);
+  delay(10);
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("🔧 Starting BLE UART + BNO055...");
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);
+
+  if (!bno.begin()) {
+    Serial.println("❌ BNO055 not detected. Check wiring or I2C address.");
+    while (1);
+  }
+
+  delay(1000);
+  bno.setExtCrystalUse(true);
+  setAccelRange(accelRangeSetting);
+  setGyroRange(gyroRangeSetting);
+
+  setupButterworthFilter(&accelX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&accelY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&accelZ, CUTOFF_FREQ, SAMPLE_RATE);
+
+  setupButterworthFilter(&gyroX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&gyroY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&gyroZ, CUTOFF_FREQ, SAMPLE_RATE);
+
+  setupButterworthFilter(&magX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&magY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&magZ, CUTOFF_FREQ, SAMPLE_RATE);
+
+  setupButterworthFilter(&eulerX, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&eulerY, CUTOFF_FREQ, SAMPLE_RATE);
+  setupButterworthFilter(&eulerZ, CUTOFF_FREQ, SAMPLE_RATE);
+
+  BLEDevice::init("ESP32-BNO055-BLE");
+  BLEServer* pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService* pService = pServer->createService("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+
+  pTxCharacteristic = pService->createCharacteristic(
+    "6E400003-B5A3-F393-E0A9-E50E24DCCA9E",
+    BLECharacteristic::PROPERTY_NOTIFY
+  );
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+  pServer->getAdvertising()->start();
+
+  Serial.println("📡 BLE advertising started as 'ESP32-BNO055-BLE'");
+}
+
+void loop() {
+  static unsigned long lastTime = 0;
+  unsigned long now = millis();
+  if (!deviceConnected || now - lastTime < 1000 / SAMPLE_RATE) return;
+  lastTime = now;
+
+  imu::Vector<3> accel = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  imu::Vector<3> gyro = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+  imu::Vector<3> mag = bno.getVector(Adafruit_BNO055::VECTOR_MAGNETOMETER);
+  imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+
+  float aX = applyButterworthFilter(&accelX, accel.x());
+  float aY = applyButterworthFilter(&accelY, accel.y());
+  float aZ = applyButterworthFilter(&accelZ, accel.z());
+
+  float gX = applyButterworthFilter(&gyroX, gyro.x());
+  float gY = applyButterworthFilter(&gyroY, gyro.y());
+  float gZ = applyButterworthFilter(&gyroZ, gyro.z());
+
+  float mX = applyButterworthFilter(&magX, mag.x());
+  float mY = applyButterworthFilter(&magY, mag.y());
+  float mZ = applyButterworthFilter(&magZ, mag.z());
+
+  float eX = applyButterworthFilter(&eulerX, euler.x());
+  float eY = applyButterworthFilter(&eulerY, euler.y());
+  float eZ = applyButterworthFilter(&eulerZ, euler.z());
+
+  String payload = String(aX, 2) + "," + String(aY, 2) + "," + String(aZ, 2) + "," +
+                   String(gX, 2) + "," + String(gY, 2) + "," + String(gZ, 2) + "," +
+                   String(mX, 2) + "," + String(mY, 2) + "," + String(mZ, 2) + "," +
+                   String(eX, 2) + "," + String(eY, 2) + "," + String(eZ, 2);
+
+  pTxCharacteristic->setValue(payload.c_str());
+  pTxCharacteristic->notify();
+
+  Serial.println("BLE sent: " + payload);
+}
