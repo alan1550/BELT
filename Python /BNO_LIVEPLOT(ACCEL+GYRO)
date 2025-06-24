@@ -1,0 +1,121 @@
+import sys
+import matplotlib
+matplotlib.use("tkagg")
+
+try:
+    from bleak.backends.winrt.util import uninitialize_sta
+    uninitialize_sta()
+except ImportError:
+    pass
+
+import asyncio
+import threading
+from bleak import BleakScanner, BleakClient
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from collections import deque
+from datetime import datetime
+
+UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+N = 100
+alpha = 0.2  # smoothing for accel
+
+# Buffers
+acc_x = deque([0.0]*N, maxlen=N)
+acc_y = deque([0.0]*N, maxlen=N)
+acc_z = deque([0.0]*N, maxlen=N)
+
+gyro_x = deque([0.0]*N, maxlen=N)
+gyro_y = deque([0.0]*N, maxlen=N)
+gyro_z = deque([0.0]*N, maxlen=N)
+
+smoothed_ax = smoothed_ay = smoothed_az = 0.0
+stop_event = threading.Event()
+
+# === Plot Setup ===
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+
+# Acceleration subplot
+line_ax, = ax1.plot(range(N), acc_x, label="AccX")
+line_ay, = ax1.plot(range(N), acc_y, label="AccY")
+line_az, = ax1.plot(range(N), acc_z, label="AccZ")
+ax1.set_ylim(-5, 5)
+ax1.set_title("Accelerometer (Smoothed, m/s²)")
+ax1.legend(loc="upper right")
+ax1.grid(True)
+
+# Gyroscope subplot
+line_gx, = ax2.plot(range(N), gyro_x, label="GyroX")
+line_gy, = ax2.plot(range(N), gyro_y, label="GyroY")
+line_gz, = ax2.plot(range(N), gyro_z, label="GyroZ")
+ax2.set_ylim(-125, 125)
+ax2.set_title("Gyroscope (deg/sec)")
+ax2.legend(loc="upper right")
+ax2.grid(True)
+
+def update_plot(_):
+    line_ax.set_ydata(list(acc_x))
+    line_ay.set_ydata(list(acc_y))
+    line_az.set_ydata(list(acc_z))
+    line_gx.set_ydata(list(gyro_x))
+    line_gy.set_ydata(list(gyro_y))
+    line_gz.set_ydata(list(gyro_z))
+    return line_ax, line_ay, line_az, line_gx, line_gy, line_gz
+
+def handle_rx(_, data):
+    global smoothed_ax, smoothed_ay, smoothed_az
+    try:
+        raw = data.decode(errors="replace").strip()
+        fields = list(map(float, raw.split(",")))
+
+        # Correct field order from ESP32: accel first, then gyro
+        ax, ay, az = fields[0:3]
+        gx, gy, gz = fields[3:6]
+
+        # Append gyro directly
+        gyro_x.append(gx)
+        gyro_y.append(gy)
+        gyro_z.append(gz)
+
+        # Smooth accel
+        smoothed_ax = alpha * ax + (1 - alpha) * smoothed_ax
+        smoothed_ay = alpha * ay + (1 - alpha) * smoothed_ay
+        smoothed_az = alpha * az + (1 - alpha) * smoothed_az
+
+        acc_x.append(smoothed_ax)
+        acc_y.append(smoothed_ay)
+        acc_z.append(smoothed_az)
+
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        print(f"[{timestamp}] Accel: X={smoothed_ax:5.2f} Y={smoothed_ay:5.2f} Z={smoothed_az:5.2f}  |  Gyro: X={gx:5.2f} Y={gy:5.2f} Z={gz:5.2f}")
+    except Exception as e:
+        print("⚠️ BLE parse error:", e)
+
+async def ble_loop():
+    print("🔍 Scanning for ESP32-BNO055-BLE...")
+    devices = await BleakScanner.discover(timeout=5)
+    target = next((d for d in devices if d.name and "ESP32-BNO055-BLE" in d.name), None)
+    if not target:
+        print("❌ ESP32 not found.")
+        return
+
+    print(f"✅ Found {target.name} at {target.address}")
+    async with BleakClient(target.address) as client:
+        print("🔗 Connected. Starting notifications...")
+        await client.start_notify(UART_RX_CHAR_UUID, handle_rx)
+        while not stop_event.is_set():
+            await asyncio.sleep(0.1)
+
+def start_ble_thread():
+    asyncio.run(ble_loop())
+
+def on_close(_):
+    print("🛑 Plot closed. Shutting down BLE...")
+    stop_event.set()
+
+fig.canvas.mpl_connect("close_event", on_close)
+threading.Thread(target=start_ble_thread, daemon=True).start()
+
+ani = animation.FuncAnimation(fig, update_plot, interval=33)
+plt.tight_layout()
+plt.show()
