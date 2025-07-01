@@ -26,7 +26,7 @@ for label, gesture_windows in windows.items():
     for i, window in enumerate(gesture_windows):
         window = np.array(window)
         if window.ndim == 1:
-            print(f"⚠️  Skipping malformed window in '{label}' at index {i}: shape {window.shape}")
+            print(f" Skipping malformed window in '{label}' at index {i}: shape {window.shape}")
             continue  # skip this malformed window
 
         X.append(extract_features(window))
