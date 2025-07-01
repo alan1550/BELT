@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
     for action in collector.ACTIONS:
         collector.reset_action(action)
-        print(f"\n🎬 Perform '{action.replace('_',' ')}' — recording {NUM_WINDOWS} windows of {SAMPLES_PER_ACTION} samples each.")
+        print(f"\n Perform '{action.replace('_',' ')}' — recording {NUM_WINDOWS} windows of {SAMPLES_PER_ACTION} samples each.")
 
         for i in range(NUM_WINDOWS):
             input(f"\n➡ Press Enter to start window {i+1}/{NUM_WINDOWS}...")
