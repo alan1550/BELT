@@ -72,7 +72,7 @@ class BLERunner:
         async with BleakClient(tgt.address) as client:
             await client.start_notify(UART_RX_CHAR_UUID, self.handle_rx)
             self.connected = True
-            print(f"✅ Connected to {tgt.name}")
+            print(f"Connected to {tgt.name}")
             while not threading.current_thread().stopped:
                 await asyncio.sleep(0.1)
 
@@ -115,7 +115,7 @@ if __name__ == "__main__":
     runner = BLERunner(collector)
     thr = runner.start()
 
-    print("⌛ Waiting for BLE connection...")
+    print("Waiting for BLE connection...")
     while not runner.connected:
         time.sleep(0.1)
 
@@ -124,7 +124,7 @@ if __name__ == "__main__":
         print(f"\n🎬 Perform '{action.replace('_',' ')}' — recording {NUM_WINDOWS} windows of {SAMPLES_PER_ACTION} samples each.")
 
         for i in range(NUM_WINDOWS):
-            input(f"\n➡️  Press Enter to start window {i+1}/{NUM_WINDOWS}...")
+            input(f"\n➡ Press Enter to start window {i+1}/{NUM_WINDOWS}...")
             collector._buffer.clear()
             collector.current = action
 
@@ -135,11 +135,11 @@ if __name__ == "__main__":
                     raise RuntimeError("BLE disconnected")
                 time.sleep(0.01)
 
-            print(f"✅ Collected window {i+1} for '{action}'")
+            print(f" Collected window {i+1} for '{action}'")
             plot_action(action, collector.windows[action][i])
             collector.current = None
 
     with open("gestures_dataset.pkl", "wb") as f:
         pickle.dump(collector.windows, f)
 
-    print("\n💾 Saved all gesture windows to gestures_dataset.pkl — ready for training!")
+    print("\n Saved all gesture windows to gestures_dataset.pkl — ready for training!")
