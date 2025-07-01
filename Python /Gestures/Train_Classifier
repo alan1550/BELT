@@ -1,0 +1,45 @@
+import pickle
+import numpy as np
+import joblib
+from sklearn.neighbors import KNeighborsClassifier
+
+# Load your labeled gesture windows
+with open("gestures_dataset.pkl", "rb") as f:
+    windows = pickle.load(f)
+
+X, y = [], []
+
+# Feature extraction: mean, std, max, min, ptp per accel/gyro axis
+def extract_features(samples):
+    samples = np.array(samples)
+    features = []
+    for i in range(6):  # 3 accel + 3 gyro
+        axis = samples[:, i]
+        features.extend([
+            np.mean(axis), np.std(axis),
+            np.max(axis), np.min(axis),
+            np.ptp(axis)
+        ])
+    return features
+
+for label, gesture_windows in windows.items():
+    for i, window in enumerate(gesture_windows):
+        window = np.array(window)
+        if window.ndim == 1:
+            print(f"⚠️  Skipping malformed window in '{label}' at index {i}: shape {window.shape}")
+            continue  # skip this malformed window
+
+        X.append(extract_features(window))
+        y.append(label)
+
+X = np.array(X)
+y = np.array(y)
+
+model = KNeighborsClassifier(n_neighbors=3)
+model.fit(X, y)
+print(f"Total training samples: {len(X)}")
+print(f"Labels: {set(y)}")
+
+# Save trained model
+joblib.dump(model, "gesture_model.pkl")
+print("✅ Model trained and saved as gesture_model.pkl")

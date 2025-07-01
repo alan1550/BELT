@@ -1,0 +1,145 @@
+import time
+import threading
+import asyncio
+import numpy as np
+import matplotlib.pyplot as plt
+import pickle
+from bleak import BleakScanner, BleakClient
+from calibration_matrix import A_INV
+
+# BLE parameters
+UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+DEVICE_NAME_SUBSTR = "ESP32-BNO055-BLE"
+SAMPLES_PER_ACTION = 90
+NUM_WINDOWS = 5
+FS = 30.0  # Hz
+
+class ActionCollector:
+    ACTIONS = [
+        "neutral",
+        "tilt_left", "tilt_right",
+        "tilt_forward", "tilt_backward",
+        "turn_left", "turn_right"
+    ]
+    
+    def __init__(self):
+        self.windows = {act: [] for act in self.ACTIONS}
+        self.current = None
+        self.count = SAMPLES_PER_ACTION
+        self._buffer = []
+
+    def on_sample(self, accel, gyro):
+        if self.current is None:
+            return
+        acc_body = A_INV @ accel
+        gyro_body = A_INV @ gyro
+        sample = np.hstack((acc_body, gyro_body))
+        self._buffer.append(sample)
+
+        if len(self._buffer) >= self.count:
+            self.windows[self.current].append(np.array(self._buffer))
+            self._buffer.clear()
+
+    def reset_action(self, action):
+        self.windows[action] = []
+        self._buffer = []
+        self.current = None
+
+    def got_all(self, action, target_count):
+        return len(self.windows[action]) >= target_count
+
+class BLERunner:
+    def __init__(self, collector):
+        self.collector = collector
+        self.connected = False
+
+    def handle_rx(self, _, data: bytearray):
+        try:
+            parts = list(map(float, data.decode().strip().split(",")))
+            if len(parts) < 6:
+                return
+            accel = np.array(parts[0:3])
+            gyro = np.array(parts[3:6])
+            self.collector.on_sample(accel, gyro)
+        except:
+            return
+
+    async def run(self):
+        devices = await BleakScanner.discover(5.0)
+        tgt = next((d for d in devices if d.name and DEVICE_NAME_SUBSTR in d.name), None)
+        if not tgt:
+            raise RuntimeError("BLE device not found")
+        async with BleakClient(tgt.address) as client:
+            await client.start_notify(UART_RX_CHAR_UUID, self.handle_rx)
+            self.connected = True
+            print(f"✅ Connected to {tgt.name}")
+            while not threading.current_thread().stopped:
+                await asyncio.sleep(0.1)
+
+    def start(self):
+        t = threading.Thread(target=lambda: asyncio.run(self.run()), daemon=True)
+        t.stopped = False
+        t.start()
+        return t
+
+def plot_action(action, data):
+    t = np.arange(data.shape[0]) / FS
+    accel = data[:, :3]
+    gyro = data[:, 3:6]
+    accel_detrended = accel - np.mean(accel, axis=0)
+
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(t, accel_detrended[:, 0], label="ax")
+    plt.plot(t, accel_detrended[:, 1], label="ay")
+    plt.plot(t, accel_detrended[:, 2], label="az")
+    plt.title(f"{action.replace('_',' ').title()} — Accel (detrended)")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Δa")
+    plt.legend(); plt.grid(True)
+
+    plt.subplot(1, 2, 2)
+    plt.plot(t, gyro[:, 0], label="gx")
+    plt.plot(t, gyro[:, 1], label="gy")
+    plt.plot(t, gyro[:, 2], label="gz")
+    plt.title(f"{action.replace('_',' ').title()} — Gyro")
+    plt.xlabel("Time (s)")
+    plt.ylabel("ω")
+    plt.legend(); plt.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    collector = ActionCollector()
+    runner = BLERunner(collector)
+    thr = runner.start()
+
+    print("⌛ Waiting for BLE connection...")
+    while not runner.connected:
+        time.sleep(0.1)
+
+    for action in collector.ACTIONS:
+        collector.reset_action(action)
+        print(f"\n🎬 Perform '{action.replace('_',' ')}' — recording {NUM_WINDOWS} windows of {SAMPLES_PER_ACTION} samples each.")
+
+        for i in range(NUM_WINDOWS):
+            input(f"\n➡️  Press Enter to start window {i+1}/{NUM_WINDOWS}...")
+            collector._buffer.clear()
+            collector.current = action
+
+            time.sleep(SAMPLES_PER_ACTION / FS)  # Force 3s wait to collect full window
+
+            while not collector.got_all(action, i + 1):
+                if not runner.connected:
+                    raise RuntimeError("BLE disconnected")
+                time.sleep(0.01)
+
+            print(f"✅ Collected window {i+1} for '{action}'")
+            plot_action(action, collector.windows[action][i])
+            collector.current = None
+
+    with open("gestures_dataset.pkl", "wb") as f:
+        pickle.dump(collector.windows, f)
+
+    print("\n💾 Saved all gesture windows to gestures_dataset.pkl — ready for training!")

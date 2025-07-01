@@ -1,0 +1,164 @@
+import asyncio, threading, time
+import numpy as np
+import matplotlib.pyplot as plt
+from bleak import BleakScanner, BleakClient
+
+# BLE and gesture parameters
+UART_RX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+DEVICE_NAME = "ESP32-BNO055-BLE"
+labels = [("shift_left", 90), ("shift_right", 90), ("rotate_left", 90), ("rotate_right", 90)]
+
+# Calibration data store
+windows = {label: [] for label, _ in labels}
+current_label = None
+target_count = 0
+connected = False
+
+# Vector math
+def normalize(vec):
+    mag = sum(v**2 for v in vec) ** 0.5
+    return [v / mag for v in vec] if mag > 0 else [0.0]*len(vec)
+
+def subtract(v1, v2):
+    return [a - b for a, b in zip(v1, v2)]
+
+def dot(v1, v2):
+    return sum(a * b for a, b in zip(v1, v2))
+
+def cross(u, v):
+    return [
+        u[1]*v[2] - u[2]*v[1],
+        u[2]*v[0] - u[0]*v[2],
+        u[0]*v[1] - u[1]*v[0],
+    ]
+
+def average_direction(samples, idx_start, idx_end):
+    normed = [normalize(row[idx_start:idx_end]) for row in samples]
+    avg = [sum(components) / len(components) for components in zip(*normed)]
+    return normalize(avg)
+
+def summarize(label, idx_start, idx_end):
+    arr = np.array(windows[label])[:, idx_start:idx_end]
+    mean = np.mean(arr, axis=0)
+    std = np.std(arr, axis=0)
+    print(f"\n📊 {label}:")
+    print(f"  Mean: {mean.round(3)}")
+    print(f"  Std : {std.round(3)}")
+    return arr
+
+def compute_alignment():
+    print("\n🧪 Summary Stats")
+    ax_sr = summarize("shift_right", 0, 3)
+    ax_sl = summarize("shift_left", 0, 3)
+    gy_rr = summarize("rotate_right", 3, 6)
+    gy_rl = summarize("rotate_left", 3, 6)
+
+    # Visual plot for inspection
+    fig = plt.figure(figsize=(10, 4))
+    plt.subplot(1, 2, 1)
+    plt.title("Accel | Shift Left vs Right")
+    plt.plot(ax_sr, label="shift_right")
+    plt.plot(-1 * ax_sl, label="-shift_left")
+    plt.grid(True); plt.legend()
+
+    plt.subplot(1, 2, 2)
+    plt.title("Gyro | Rotate Left vs Right")
+    plt.plot(gy_rr, label="rotate_right")
+    plt.plot(-1 * gy_rl, label="-rotate_left")
+    plt.grid(True); plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Compute body axes
+    dx = normalize([
+        (r + -l) / 2 for r, l in zip(
+            average_direction(windows["shift_right"], 0, 3),
+            average_direction(windows["shift_left"], 0, 3)
+        )
+    ])
+    dy = normalize([
+        (r + -l) / 2 for r, l in zip(
+            average_direction(windows["rotate_right"], 3, 6),
+            average_direction(windows["rotate_left"], 3, 6)
+        )
+    ])
+
+    proj = dot(dx, dy)
+    dx = normalize(subtract(dx, [proj * y for y in dy]))
+    dz = normalize(cross(dx, dy))
+
+    print("\n🧭 Computed Body Axes")
+    print(f"  dx (X): {np.round(dx, 3)}")
+    print(f"  dy (Y): {np.round(dy, 3)}")
+    print(f"  dz (Z): {np.round(dz, 3)}")
+
+    A = [dx, dy, dz]
+    A_inv = [[A[j][i] for j in range(3)] for i in range(3)]  # Transpose for inverse
+    return A_inv
+
+def write_matrix(matrix):
+    with open("calibration_matrix.py", "w") as f:
+        f.write("# Auto-generated calibration matrix (sensor -> body frame)\n")
+        f.write("A_INV = [\n")
+        for row in matrix:
+            f.write("    [% .6f, % .6f, % .6f],\n" % tuple(row))
+        f.write("]\n")
+    print("\n💾 calibration_matrix.py saved!")
+
+def handle_rx(_, data):
+    global current_label
+    try:
+        fields = list(map(float, data.decode(errors="replace").strip().split(",")))
+        if len(fields) < 6 or current_label is None:
+            return
+        if len(windows[current_label]) < target_count:
+            windows[current_label].append(fields[:6])
+    except:
+        return
+
+async def ble_loop():
+    global connected
+    print("🔍 Scanning for ESP32...")
+    devices = await BleakScanner.discover(timeout=5)
+    target = next((d for d in devices if d.name == DEVICE_NAME), None)
+    if not target:
+        print("❌ ESP32 not found.")
+        return
+
+    async with BleakClient(target.address) as client:
+        print(f"✅ Connected to {target.name}")
+        connected = True
+        await client.start_notify(UART_RX_CHAR_UUID, handle_rx)
+        while not stop_event.is_set():
+            await asyncio.sleep(0.1)
+
+def start_ble():
+    asyncio.run(ble_loop())
+
+# === Main ===
+stop_event = threading.Event()
+threading.Thread(target=start_ble, daemon=True).start()
+
+print("🔌 Waiting for BLE connection...")
+while not connected:
+    time.sleep(0.1)
+
+print("\n🎯 BEGIN CALIBRATION")
+for label, count in labels:
+    windows[label] = []
+    input(f"\n➡️  Press Enter when ready to perform '{label}' ({count} samples)...")
+    current_label = label
+    target_count = count
+    while len(windows[label]) < count:
+        time.sleep(0.01)
+    print(f"  ✅ Collected {count} samples for '{label}'.")
+
+current_label = None
+stop_event.set()
+
+print("\n🔧 Computing alignment matrix...")
+matrix = compute_alignment()
+write_matrix(matrix)
+
+print("🎉 Calibration complete. You’re ready to log data in the body frame!")
